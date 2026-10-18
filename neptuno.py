@@ -330,12 +330,15 @@ class Juego:
         self.enemigos = []
         self.tormentas = []
         self.explosiones = []
+        self.ondas = []        # ondas expansivas de las explosiones [x, y, vida]
+        self.flotantes = []    # textos "+100" que suben y se desvanecen [x, y, vida, texto, color]
+        self.flash_puntaje = 0.0
         self.pings = []
         self.logs = []
         self.hold = 0.0
         self.victoria = False
         self.t_evento = 6.0
-        self.stats = {"neutralizados": 0, "tormentas": 0, "fallas": 0}
+        self.stats = {"neutralizados": 0, "tormentas": 0, "fallas": 0, "puntaje": 0}
         self.control = [0.0] * len(FLOTAS)
         self.controlada = [False] * len(FLOTAS)
         self.ops = [0] * len(FLOTAS)
@@ -465,6 +468,7 @@ class Juego:
             if e.eng > 5:
                 self.explosion(e.x, e.y)
                 self.stats["neutralizados"] += 1
+                self.sumar_puntos(100, e.x, e.y, (255, 220, 90))
                 self.log("info", f"Contacto hostil neutralizado por {g.nombre}.")
                 if random.random() < 0.25 and g.falla <= 0:
                     g.falla = 10.0
@@ -498,6 +502,7 @@ class Juego:
             self.control[i] = max(0.0, min(100.0, self.control[i] + d * dt))
             if not self.controlada[i] and self.control[i] >= 100:
                 self.controlada[i] = True
+                self.sumar_puntos(250, cx, cy - self.radio_region(i), FLOTAS[i][6])
                 self.log("info", f"Región {FLOTAS[i][2]} bajo control.")
             elif self.controlada[i] and self.control[i] < 85:
                 self.controlada[i] = False
@@ -512,9 +517,18 @@ class Juego:
                 self.hold = max(0.0, self.hold - dt * 0.5)
 
     def explosion(self, x, y):
-        for _ in range(24):
-            a, v = random.random() * 6.283, random.uniform(10, 60)
-            self.explosiones.append([x, y, math.cos(a) * v, math.sin(a) * v, 1.0])
+        """Explosión con chispas de varios tamaños/colores y una onda expansiva."""
+        for _ in range(40):
+            a, v = random.random() * 6.283, random.uniform(15, 90)
+            col = random.choice([(255, 240, 160), (255, 170, 40), (255, 90, 30)])
+            self.explosiones.append([x, y, math.cos(a) * v, math.sin(a) * v, 1.0, random.uniform(1.5, 3.5), col])
+        self.ondas.append([x, y, 1.0])
+
+    def sumar_puntos(self, puntos, x, y, color):
+        """Suma puntaje, muestra un texto flotante y hace brillar el marcador del HUD."""
+        self.stats["puntaje"] += puntos
+        self.flotantes.append([x, y, 1.0, f"+{puntos}", color])
+        self.flash_puntaje = 1.0
 
     # ---- entrada
     def grupo_en(self, pos, umbral=12):
@@ -614,14 +628,37 @@ class Juego:
             pygame.draw.polygon(p, (255, 46, 46), [(x, y - k), (x + k, y), (x, y + k), (x - k, y)])
             pygame.draw.circle(p, (255, 46, 46), (int(x), int(y)), 14, 1)
         # efectos
+        for o in self.ondas[:]:
+            o[2] -= 0.016 * 1.5
+            if o[2] <= 0:
+                self.ondas.remove(o)
+                continue
+            r = int(6 + (1 - o[2]) * 34)
+            surf = pygame.Surface((r * 2 + 4, r * 2 + 4), pygame.SRCALPHA)
+            if o[2] > 0.75:  # destello inicial
+                pygame.draw.circle(surf, (255, 250, 220, int(255 * (o[2] - 0.75) * 4)), (r + 2, r + 2), max(3, r // 2))
+            pygame.draw.circle(surf, (255, 200, 80, int(220 * o[2])), (r + 2, r + 2), r, 2)
+            p.blit(surf, (o[0] - r - 2, o[1] + TOP - r - 2))
         for e in self.explosiones[:]:
+            e[2] *= 0.96  # las chispas frenan
+            e[3] *= 0.96
             e[0] += e[2] * 0.016
             e[1] += e[3] * 0.016
-            e[4] -= 0.016 * 1.2
+            e[4] -= 0.016 * 1.1
             if e[4] <= 0:
                 self.explosiones.remove(e)
             else:
-                pygame.draw.circle(p, (255, int(170 * e[4]), 40), (int(e[0]), int(e[1] + TOP)), 2)
+                col = tuple(int(c * (0.4 + 0.6 * e[4])) for c in e[6])
+                pygame.draw.circle(p, col, (int(e[0]), int(e[1] + TOP)), max(1, int(e[5] * e[4] + 0.5)))
+        for ft in self.flotantes[:]:
+            ft[1] -= 0.016 * 30  # sube
+            ft[2] -= 0.016 * 0.8
+            if ft[2] <= 0:
+                self.flotantes.remove(ft)
+                continue
+            img = self.f_med.render(ft[3], True, ft[4])
+            img.set_alpha(int(255 * min(1.0, ft[2] * 1.5)))
+            p.blit(img, (ft[0] - img.get_width() // 2, ft[1] + TOP - 18))
         for pg in self.pings[:]:
             pg[2] -= 0.02
             if pg[2] <= 0:
@@ -639,8 +676,10 @@ class Juego:
             m = f"Tiempo {int(self.t // 60)} min {int(self.t % 60)} s · Neutralizados {s['neutralizados']} · Tormentas {s['tormentas']} · Fallos {s['fallas']}"
             t2 = self.f_med.render(m, True, (255, 255, 255))
             p.blit(t2, (WIN_W // 2 - t2.get_width() // 2, 300))
+            tp = self.f_med.render(f"PUNTAJE FINAL: {s['puntaje']}", True, (255, 220, 90))
+            p.blit(tp, (WIN_W // 2 - tp.get_width() // 2, 328))
             t3 = self.f_chica.render("R: nueva partida", True, (217, 195, 131))
-            p.blit(t3, (WIN_W // 2 - t3.get_width() // 2, 335))
+            p.blit(t3, (WIN_W // 2 - t3.get_width() // 2, 360))
         elif self.pausa:
             t = self.f_grande.render("PAUSA", True, (255, 255, 255))
             p.blit(t, (WIN_W // 2 - t.get_width() // 2, 100 + TOP))
@@ -663,7 +702,14 @@ class Juego:
         self.texto(f"Sostener {int(self.hold)}/{int(TIEMPO_SOSTENER)} s", (690, 8), self.f_med, (255, 176, 0))
         pygame.draw.rect(p, (40, 50, 55), (690, 32, 160, 8))
         pygame.draw.rect(p, (255, 176, 0), (690, 32, int(160 * self.hold / TIEMPO_SOSTENER), 8))
-        self.texto(f"{int(self.reloj.get_fps())} FPS", (900, 14), self.f_chica, CIAN)
+        # marcador de puntaje: brilla en blanco al sumar puntos y vuelve a dorado
+        self.flash_puntaje = max(0.0, self.flash_puntaje - 0.016 * 2)
+        k = self.flash_puntaje
+        col_p = (255, int(220 + 35 * k), int(90 + 165 * k))
+        self.texto("PUNTAJE", (875, 6), self.f_chica, (127, 163, 154))
+        self.texto(f"{self.stats['puntaje']:05d}", (875, 22), self.f_med, col_p)
+        if k > 0:
+            pygame.draw.rect(p, col_p, (870, 20, 70, 22), 1)
         # consola inferior
         y0 = TOP + MAP_H
         pygame.draw.rect(p, (3, 9, 13), (0, y0, WIN_W, WIN_H - y0))
@@ -674,6 +720,7 @@ class Juego:
             self.texto("Clic en el océano: mover · B: volver a base · ESC: deseleccionar", (14, y0 + 26), self.f_chica, (127, 163, 154))
         else:
             self.texto("Clic en un barco para seleccionar su flota · TAB cambia de flota · ESPACIO pausa · V velocidad · R reinicia", (14, y0 + 8), self.f_chica, (127, 163, 154))
+        self.texto(f"{int(self.reloj.get_fps())} FPS", (WIN_W - 60, WIN_H - 18), self.f_chica, (60, 90, 85))
         colores = {"info": (93, 255, 160), "alerta": (255, 176, 0), "conflicto": (255, 70, 70)}
         for i, (h, m, tipo) in enumerate(self.logs[:6]):
             self.texto(h + "  " + m, (14, y0 + 50 + i * 16), self.f_chica, colores[tipo])
@@ -720,7 +767,9 @@ def prueba():
     for _ in j.correr(900):
         pass
     pygame.image.save(j.pantalla, "captura.png")
-    print("PRUEBA OK · t=%.0fs · regiones=%d · neutralizados=%d · logs=%d" % (j.t, sum(j.controlada), j.stats["neutralizados"], len(j.logs)))
+    esperado = 100 * j.stats["neutralizados"]
+    assert j.stats["puntaje"] >= esperado, "el puntaje no cuenta los neutralizados"
+    print("PRUEBA OK · t=%.0fs · regiones=%d · neutralizados=%d · puntaje=%d · logs=%d" % (j.t, sum(j.controlada), j.stats["neutralizados"], j.stats["puntaje"], len(j.logs)))
     for l in j.logs[:4]:
         print("  ", l)
 
